@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+venv/
+.venv/
+.env
+.DS_Store
+
+# Dataset (too large for git — download separately)
+Dataset/
