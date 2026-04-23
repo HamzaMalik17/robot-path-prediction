@@ -267,7 +267,7 @@ output_data = training_data[1:]
 knn_reg.fit(input_data, output_data)
 
 
-testing_data_new = testing_data[59:240]
+testing_data_new = testing_data[59:239]
 y_pred = knn_reg.predict(testing_data_new)
 plt.plot(y_pred[:, 0], y_pred[:, 1], color='red')
 plt.xlabel('X')

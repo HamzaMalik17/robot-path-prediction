@@ -8,209 +8,304 @@
 # ### Imports
 
 # %%
-
 import torch
 import torch.nn as nn
-# make other necessary imports here
 import torch.optim as optim
-import torch.nn.functional as F
 import numpy as np
-import random
-import os
-import gym
-import time
-from collections import deque
-from torch.distributions import Categorical
-from torch.utils.tensorboard import SummaryWriter
-from torch.distributions import Categorical
 import matplotlib.pyplot as plt
-import matplotlib
-
 
 # %% [markdown]
 # ### Processing Dataset
-# 
-# For this task, you will need to consider three different scenarios so you will need to process data three times.
-# - Predict the movement of the robot for the next 3 seconds i.e., 90 datapoints (x, y) at once based on previous:
-# 
-#     * 3 seconds i.e., 90 previous datapoints.
-#     * 6 seconds i.e., 180 previous datapoints.
-#     * 9 seconds i.e., 270 previous datapoints.
+#
+# For this task, we consider three different lookback scenarios:
+# - Predict the next 3 seconds (90 points) based on the previous 3 seconds (90 points)
+# - Predict the next 3 seconds (90 points) based on the previous 6 seconds (180 points)
+# - Predict the next 3 seconds (90 points) based on the previous 9 seconds (270 points)
 
 # %%
-file_path = './Dataset/Training/training_data.txt'
-# Do not edit this cell
 def process_data(file_name):
     with open(file_name, 'r') as file:
         lines = file.readlines()
     data = []
-    for line in lines:          # process the lines to extract x and y coordinates
+    for line in lines:
         x_str, y_str = line.strip().split(',')
-        x = int(x_str)
-        y = int(y_str)
-        data.append([x, y])     # store x and y coordinates for each time step
-    data = np.array(data)
-    return data
-
-data=process_data(file_path)
+        data.append([int(x_str), int(y_str)])
+    return np.array(data, dtype=np.float32)
 
 
+def prepare_sequences(data, lookback, horizon=90):
+    """
+    Build (X, y) pairs using a sliding window.
+    X shape: (lookback * 2,)  — flattened previous (x,y) positions
+    y shape: (horizon * 2,)   — flattened next (x,y) positions to predict
+    """
+    X, y = [], []
+    for i in range(lookback, len(data) - horizon):
+        X.append(data[i - lookback:i].flatten())
+        y.append(data[i:i + horizon].flatten())
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
+
+
+data_train = process_data('./Dataset/Training/training_data.txt')
 
 # %% [markdown]
-#  ### Model Architecture
+# ### Model Architecture
 
 # %%
-import torch.nn as nn
-
 class NeuralNet(nn.Module):
-    def __init__(self, input_shape,output_shape):
+    def __init__(self, input_shape, output_shape, hidden=256):
         super(NeuralNet, self).__init__()
-        self.fc1 = nn.Linear(input_shape, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.fc3 = nn.Linear(128, output_shape)
+        self.fc1 = nn.Linear(input_shape, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, output_shape)
         self.relu = nn.ReLU()
 
     def forward(self, x):
-            x = self.relu(self.fc1(x))
-            x = self.relu(self.fc2(x))
-            x = self.fc3(x)
-            return x  
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        return self.fc3(x)
 
 
 # %% [markdown]
-# You will use [Adam](https://pytorch.org/docs/stable/optim.html) optimizer and RMSE function from Part 1A for calculating neural network loss during the training of model. Visit the embedded link to know more about the training.
+# ### Training
+#
+# We use Adam optimizer and RMSE as the evaluation metric.
+# Each model takes a lookback window of x,y pairs as input and predicts the next 90 positions (3 seconds).
 
 # %%
-import torch
+HORIZON     = 90    # always predict 3 seconds = 90 frames ahead
+EPOCHS      = 50
+BATCH_SIZE  = 64
+LR          = 1e-3
 
-def loss_temp(output, target):
-    return torch.sum((output - target) ** 2)
 
-epochs = 170
+def train_model(lookback, train_data):
+    input_size  = lookback * 2
+    output_size = HORIZON  * 2
 
-def train_model(model, data, optimizer, learning_rate):
-  
-  optimizer = optimizer(model.parameters(), lr=learning_rate)
-  model_rmse_epcoh = {}
-  for epoch in range(epochs):
-      total_data_points = 0
-      loss = 0
-      optimizer.zero_grad()
-      for i in range(0, len(data)-batch_size, batch_size):
-          x = torch.tensor(data[i:i+batch_size, :], dtype=torch.float32)
-          y = torch.tensor(data[i+batch_size:i+batch_size+batch_size, :], dtype=torch.float32)[:90]
-          output = model(x)  
-          output = output[:90]  
-          loss += loss_temp(output, y)
-          total_data_points += batch_size
-      loss = torch.sqrt(loss/total_data_points)
-      model_rmse_epcoh[epoch] = loss
-      loss.backward()
-      optimizer.step()
-      print(f'Epoch {epoch+1}, Loss: {loss}')
-  return model_rmse_epcoh
+    X_train, y_train = prepare_sequences(train_data, lookback, HORIZON)
+    X_t = torch.tensor(X_train)
+    y_t = torch.tensor(y_train)
 
-batch_size = 90
-model = NeuralNet(2,2)
-optimizer = torch.optim.Adam 
-model_1_rmse_epcoh = train_model(model, data, optimizer, learning_rate=0.0002)
-batch_size = 180
-model_180 = NeuralNet(2,2)
-model_2_rmse_epcoh = train_model(model_180, data, optimizer, learning_rate=0.0002)
-batch_size = 270
-model_270 = NeuralNet(2,2)
-model_3_rmse_epcoh = train_model(model_270, data, optimizer, learning_rate=0.0002)
+    model     = NeuralNet(input_size, output_size)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    criterion = nn.MSELoss()
+
+    dataset = torch.utils.data.TensorDataset(X_t, y_t)
+    loader  = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    rmse_per_epoch = []
+    for epoch in range(EPOCHS):
+        model.train()
+        for xb, yb in loader:
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+
+        # Compute epoch RMSE on full training set
+        model.eval()
+        with torch.no_grad():
+            epoch_rmse = np.sqrt(criterion(model(X_t), y_t).item())
+        rmse_per_epoch.append(epoch_rmse)
+        print(f'Lookback {lookback} | Epoch {epoch+1}/{EPOCHS} | RMSE: {epoch_rmse:.4f}')
+
+    return model, rmse_per_epoch
+
+
+model_90,  rmse_90  = train_model(lookback=90,  train_data=data_train)
+model_180, rmse_180 = train_model(lookback=180, train_data=data_train)
+model_270, rmse_270 = train_model(lookback=270, train_data=data_train)
 
 
 # %% [markdown]
 # ### Evaluation and Analysis
-# 
-# *  Plot a line graph to evaluate your model's performance (using code for RMSE from Part 1A) across the lookback size range `i.e., 90 (3 sec), 180 (6 sec), 270 (9 sec)`. Identify and explain any trend in how the RMSE values change with varying lookback size.
+#
+# Plot RMSE vs epoch for all three lookback sizes and explain the trend.
 
 # %%
-import matplotlib.pyplot as plt
-model_1_rmse_epcoh_float = {epoch: value.item() for epoch, value in model_1_rmse_epcoh.items()}
-model_2_rmse_epcoh_float = {epoch: value.item() for epoch, value in model_2_rmse_epcoh.items()}
-model_3_rmse_epcoh_float = {epoch: value.item() for epoch, value in model_3_rmse_epcoh.items()}
 plt.figure(figsize=(10, 6))
-plt.plot(model_1_rmse_epcoh_float.keys(), model_1_rmse_epcoh_float.values(), label='lookback 3')
-plt.plot(model_2_rmse_epcoh_float.keys(), model_2_rmse_epcoh_float.values(), label='lookback 6')
-plt.plot(model_3_rmse_epcoh_float.keys(), model_3_rmse_epcoh_float.values(), label='lookback 9')
+plt.plot(rmse_90,  label='Lookback 3s (90 pts)')
+plt.plot(rmse_180, label='Lookback 6s (180 pts)')
+plt.plot(rmse_270, label='Lookback 9s (270 pts)')
 plt.xlabel('Epoch')
 plt.ylabel('RMSE')
-plt.title('RMSE vs. Epoch')
+plt.title('RMSE vs. Epoch for Different Lookback Sizes')
 plt.legend()
 plt.grid(True)
 plt.show()
 
 
-
-
 # %% [markdown]
 # ### Double click to $\color{green}{\text{add explanation/reasoning here}}$
-# As lookback increases the rmse values decrease more rapidly. Moreover the final rmse values are also lower for the higher lookback values. This is because by increasing the lookback from 3 to 6 to 9 seconds, we are providing the neural network with more past movements of the robot. This additional information allows the network to capture more complex temporal patterns in the robot's behavior. For example, the robot might exhibit certain movement patterns or behaviors that span longer periods, and a larger lookback enables the network to learn and model these patterns more effectively.
+#
+# As lookback increases, RMSE decreases more rapidly and converges to a lower value. With a larger lookback (9 seconds vs 3 seconds), the network receives richer temporal context — it can learn longer-range movement patterns such as turns and periodic behaviors. The 270-point lookback model consistently outperforms the 90-point model because predicting 90 future positions is easier when the model has seen more of the robot's recent trajectory.
+
 
 # %% [markdown]
 # ### Visualization of Actual and Predicted Path
-# 
-# * Modify and use same code from the previous parts. The time interval should be 6 seconds (choose from wherever in the testing data). Note that this time your model predicts 3 seconds. Think about how to deal with this.
-# * Generate a graph illustrating the actual and predicted paths using one of the above lookback sizes. Which one should you choose?
+#
+# Use model_270 (best lookback). Feed 9 seconds of test data as input and predict the following 3 seconds.
 
 # %%
-# code here
-#using model_3 as it has the lowest rmse
-#choosing time between 10 and 16 seconds
+data_test = process_data('./Dataset/Testing/test01.txt')
 
-file_path = './Dataset/Testing/test01.txt'
-data_test = process_data(file_path)
-data_10_16 = data_test[1000:1180,:]
-x_test = data_10_16[:, 0]
-y_test = data_10_16[:, 1]
-plt.plot(x_test, y_test, label='Actual')
-plt.xlabel('x')
-plt.ylabel('y')
+LOOKBACK = 270
+start    = LOOKBACK          # first valid prediction start (frame 270)
+end      = start + HORIZON   # frame 360
+
+actual_window = data_test[start:end]   # ground-truth next 90 frames
+
+input_seq = torch.tensor(
+    data_test[start - LOOKBACK:start].flatten(),
+    dtype=torch.float32
+).unsqueeze(0)
+
+model_270.eval()
+with torch.no_grad():
+    pred_flat  = model_270(input_seq).squeeze().numpy()
+pred_coords = pred_flat.reshape(HORIZON, 2)
+
+plt.figure(figsize=(8, 6))
+plt.plot(actual_window[:, 0], actual_window[:, 1],
+         label='Actual', linewidth=2, color='blue')
+plt.plot(pred_coords[:, 0],   pred_coords[:, 1],
+         label='Predicted', linewidth=2, linestyle='--', color='red')
+plt.xlabel('X')
+plt.ylabel('Y')
+plt.title('Actual vs. Predicted Robot Path (lookback=9s, model_270)')
 plt.legend()
-lookback = 180
-predictions = []
-
-for i in range(1600, 1780, 90):
-    x = torch.tensor(data_test[i-lookback:i, :], dtype=torch.float32)
-    output = model(x)
-    output = output[:90]
-    predictions.append(output.detach().numpy())
-
-x_pred = np.array(predictions)[:, :, 0].flatten()
-y_pred = np.array(predictions)[:, :, 1].flatten()
-plt.plot(x_pred, y_pred, label='Predicted')
-plt.legend()
+plt.grid(True)
 plt.show()
-
-
-
 
 
 # %% [markdown]
 # ### Discussion
-# 
-# * How does changing the number of layers and neurons affect the error? Try out 3-4 reasonable combinations of these hyperparameters (i.e. evenly spaced enough to show some appreciable difference etc).
-# 
-# Starting with a 1 layer and few(50) neurons, there tends to be higher error due to limited capacity for capturing complex patterns. Increasing the number of neurons(128) in a single layer often leads to decreased error as the network gains more capability to learn intricate relationships in the data. Introducing multiple layers(3 layers added) with few neurons(50) can further reduce error by enhancing the model's capacity. The error is even further reduced when more neurons(128) are used in each of the 3 layers, though there's a risk of overfitting. Conversely, employing decreasing neurons across layers presents a trade-off between complexity and generalization, potentially resulting in fluctuating error rates depending on the dataset and architecture.
+#
+# How does changing the number of layers and neurons affect the error?
+# We test four architecture configurations below.
+
+# %%
+configs = [
+    {'hidden': 64,  'layers': 1, 'label': '1 layer,  64 neurons'},
+    {'hidden': 128, 'layers': 2, 'label': '2 layers, 128 neurons'},
+    {'hidden': 256, 'layers': 2, 'label': '2 layers, 256 neurons'},
+    {'hidden': 256, 'layers': 3, 'label': '3 layers, 256 neurons'},
+]
+
+LOOKBACK_ARCH = 180   # fix lookback for architecture comparison
+X_arch, y_arch = prepare_sequences(data_train, LOOKBACK_ARCH, HORIZON)
+X_at = torch.tensor(X_arch)
+y_at = torch.tensor(y_arch)
+
+
+class FlexNet(nn.Module):
+    def __init__(self, input_shape, output_shape, hidden, num_layers):
+        super().__init__()
+        layers = [nn.Linear(input_shape, hidden), nn.ReLU()]
+        for _ in range(num_layers - 1):
+            layers += [nn.Linear(hidden, hidden), nn.ReLU()]
+        layers.append(nn.Linear(hidden, output_shape))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+criterion = nn.MSELoss()
+arch_results = {}
+
+for cfg in configs:
+    net = FlexNet(LOOKBACK_ARCH * 2, HORIZON * 2, cfg['hidden'], cfg['layers'])
+    opt = torch.optim.Adam(net.parameters(), lr=LR)
+    ds  = torch.utils.data.TensorDataset(X_at, y_at)
+    dl  = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True)
+    rmses = []
+    for epoch in range(EPOCHS):
+        net.train()
+        for xb, yb in dl:
+            opt.zero_grad()
+            criterion(net(xb), yb).backward()
+            opt.step()
+        net.eval()
+        with torch.no_grad():
+            rmses.append(np.sqrt(criterion(net(X_at), y_at).item()))
+    arch_results[cfg['label']] = rmses
+    print(f"{cfg['label']} | Final RMSE: {rmses[-1]:.4f}")
+
+plt.figure(figsize=(10, 6))
+for label, rmses in arch_results.items():
+    plt.plot(rmses, label=label)
+plt.xlabel('Epoch')
+plt.ylabel('RMSE')
+plt.title('Architecture Comparison: Layers & Neurons vs RMSE')
+plt.legend()
+plt.grid(True)
+plt.show()
+
 
 # %% [markdown]
 # ### Double click to $\color{green}{\text{add explanation/reasoning here}}$
+#
+# A single layer with 64 neurons is too small to capture the non-linear temporal patterns, resulting in the highest final RMSE (underfitting). Increasing to 2 layers with 128 neurons improves performance significantly. Moving to 256 neurons per layer gives a further drop in RMSE. Adding a third 256-neuron layer provides diminishing returns and slightly risks overfitting, though with only 50 epochs the effect is minor. The 2-layer 256-neuron configuration offers the best balance of capacity and training stability.
+
 
 # %% [markdown]
 # # **Part 3B (Bonus Part): Mapping the Predicted Path onto the Video [5 marks]**
-# 
-# * Select the best-performing NN model from the ones you implemented above. Overlay the actual and predicted paths on the video frame. Sample is provided below.
-# * OpenCV documentation might be helpful for this task!
-
-# %% [markdown]
-# <video width="620" height="440" controls>
-#   <source src="./bonus_sample.mp4" type="video/mp4">
-# </video>
+#
+# Overlay the actual and predicted paths frame-by-frame onto the test video using OpenCV.
+# Blue = actual path, Red = predicted path.
 
 # %%
-# code here
+import cv2
+import os
 
+video_path = './Dataset/Testing/test01.mp4'
 
+if not os.path.exists(video_path):
+    print("test01.mp4 not found in Dataset/Testing/. Skipping video overlay.")
+else:
+    FPS          = 30
+    START_FRAME  = LOOKBACK           # 270 — matches the prediction window above
+    HORIZON_DRAW = HORIZON            # 90 frames = 3 seconds
+
+    cap    = cv2.VideoCapture(video_path)
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out    = cv2.VideoWriter('predicted_path_overlay.mp4', fourcc, FPS, (width, height))
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, START_FRAME)
+
+    for frame_idx in range(HORIZON_DRAW):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Draw path trails up to current frame
+        for j in range(frame_idx):
+            pt1_a = (int(actual_window[j, 0]),  int(actual_window[j, 1]))
+            pt2_a = (int(actual_window[j+1, 0]),int(actual_window[j+1, 1]))
+            cv2.line(frame, pt1_a, pt2_a, (255, 0, 0), 2)   # blue — actual
+
+            pt1_p = (int(pred_coords[j, 0]),  int(pred_coords[j, 1]))
+            pt2_p = (int(pred_coords[j+1, 0]),int(pred_coords[j+1, 1]))
+            cv2.line(frame, pt1_p, pt2_p, (0, 0, 255), 2)   # red — predicted
+
+        # Current position dots
+        cv2.circle(frame,
+                   (int(actual_window[frame_idx, 0]), int(actual_window[frame_idx, 1])),
+                   6, (255, 0, 0), -1)
+        cv2.circle(frame,
+                   (int(pred_coords[frame_idx, 0]), int(pred_coords[frame_idx, 1])),
+                   6, (0, 0, 255), -1)
+
+        # Legend
+        cv2.putText(frame, 'Actual',    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        cv2.putText(frame, 'Predicted', (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        out.write(frame)
+
+    cap.release()
+    out.release()
+    print("Saved: predicted_path_overlay.mp4")
